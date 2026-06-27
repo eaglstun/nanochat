@@ -229,6 +229,19 @@ def get_sync_fn(device_type):
         return torch.mps.synchronize
     return lambda: None
 
+def get_max_memory_fn(device_type):
+    """Return a callable giving peak device memory used, in bytes (0 if N/A).
+    cuda tracks a true peak (max_memory_allocated). MPS has no peak/high-water API,
+    so we report driver_allocated_memory: total memory reserved by the Metal caching
+    allocator, which grows to a high-water during a run and is not returned until
+    empty_cache() -- a reasonable peak proxy, and far better than the old `lambda: 0`
+    that printed a misleading "0.00MiB" on Mac. cpu has nothing to report."""
+    if device_type == "cuda":
+        return torch.cuda.max_memory_allocated
+    if device_type == "mps":
+        return torch.mps.driver_allocated_memory
+    return lambda: 0
+
 class DummyWandb:
     """Useful if we wish to not use wandb but have all the same signatures"""
     def __init__(self):
