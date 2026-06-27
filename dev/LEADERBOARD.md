@@ -1,5 +1,12 @@
 # Leaderboard
 
+> **Fork note (eaglstun/nanochat):** Upstream nanochat targets the 8×H100
+> "Time-to-GPT-2" speedrun documented below. This fork additionally hardens the
+> **Apple Silicon / MPS** path so the full pipeline runs end-to-end on a Mac
+> (training, inference, eval). See [Running on Apple Silicon](#running-on-apple-silicon-fork-addition)
+> at the bottom for what was fixed and real M4 Max numbers. The H100 speedrun
+> runs below are unchanged from upstream.
+
 Docs on participating in the "Time-to-GPT-2" leaderboard of nanochat.
 
 The primary metric we care about is "time to GPT-2" - the wall clock time needed to outperform the GPT-2 (1.6B) CORE metric on an 8XH100 GPU node. Originally in 2019, GPT-2 was trained by OpenAI on 32 TPU v3 chips for 168 hours (7 days), with $8/hour/TPUv3 back then, for a total cost of approx. $43K. It achieves 0.256525 CORE score, which is an ensemble metric introduced in the DCLM paper over 22 evaluations like ARC/MMLU/etc.
@@ -33,7 +40,7 @@ Note that:
 - `sample-every = -1` turns off periodic sampling
 - `core-metric-max-per-task=-1` means we run the entire CORE eval
 - `core-metric-every=999999` a bit of a hacky way to make the CORE eval only happen a single time at the very end of the run
-- `target-param-data-ratio=8.25` controls the training horizon, which is determined in the script by taking the number of non-embedding model parameters and simply multiplying by this number. The current optimal Tokens:Params ratio can be seen in the defaults of the `base_train.py` script (it is 10.5). 10.5 would produce the *compute optimal* model given the currently measured scaling laws. However, GPT-2 capability is currently somewhere in between a d24 and d26. So to reach it exactly, we want to either overtrain d24 or undertrain d26. In this particular example, I am choosing to slightly undertrain a d26. Note that odd depths (e.g. d25) are not super recommended to use because the math around the transformer sizing and its head dimensions doesn't come out neatly.
+- `target-param-data-ratio=8.25` controls the training horizon, which is determined in the script by taking the number of non-embedding model parameters and simply multiplying by this number. The current optimal Tokens:Params ratio can be seen in the defaults of the `base_train.py` script (it is 10.5). 10.5 would produce the _compute optimal_ model given the currently measured scaling laws. However, GPT-2 capability is currently somewhere in between a d24 and d26. So to reach it exactly, we want to either overtrain d24 or undertrain d26. In this particular example, I am choosing to slightly undertrain a d26. Note that odd depths (e.g. d25) are not super recommended to use because the math around the transformer sizing and its head dimensions doesn't come out neatly.
 - `--fp8` turns on fp8 training. If your GPU does not support fp8, you can leave this out and the code will simply train in bf16. bf16 is higher precision than fp8, so you can actually expect that you might be able to do fewer steps (lower the `target-param-data-ratio`) to achieve the same capability.
 
 Once you kick off the run, you wait ~1.5 hours and then at the end you'll see something like:
@@ -189,7 +196,7 @@ I ran this command 7 individual times. Because our training is mildly non-determ
 
 Mean is 0.25714 (higher than the GPT-2 threshold needed), max-min is 0.01646. Something to investigate in the future is that even slightly better results can be obtained by randomly shuffling the the data shards (i.e. just going in a different order). This is unexpected because the documents were completely fully shuffled during data construction, so one would expect a relatively uniform data distribution. Indeed, the current default order is unfortunately among the worse ("unlucky") ones you can obtain with different shuffle seeds, but it suffices to beat GPT-2 for now so I am merging. TODO investing a bit more later.
 
-NOTE: The `val_bpb` is as of this run *NOT* comparable due to the data distribution change to the previous 3 runs. This run happens to be at `0.71854` validation bpb. If the dataset is not changed, the `val_bpb` number is a great, smooth metric to track relative performance w.r.t. and has less noise than CORE.
+NOTE: The `val_bpb` is as of this run _NOT_ comparable due to the data distribution change to the previous 3 runs. This run happens to be at `0.71854` validation bpb. If the dataset is not changed, the `val_bpb` number is a great, smooth metric to track relative performance w.r.t. and has less noise than CORE.
 
 ## Run 5
 
@@ -200,3 +207,56 @@ This commit is special because all of the improvements that went into [this comm
 ## Run 6
 
 Achieved Mar 14, 2026 on commit `a825e63`. Exactly the same launch command as Run 4 except `--target-param-data-ratio=8`. Improvements in the architecture are allowing us to train shorter and shorter time. Instead of an undertrained d24 I attempted to train an overtrained d22 but it was worse. This set of changes came from autoresearch round 2, where I asked it to reference the modded-nanogpt repo for inspiration. So the exploration tried out a number of ideas and in particular found a way to incorporate the backout and smear in such a way that they are helpful (I had previously tried them manually a long time ago and they caused regressions). The smear idea in particular is a little bit heavier and bloaty because it is essentially an "early fusion" of context across tokens, producing a kind of a bigram input into the network and allowing it to focus on higher ngrams earlier. But for this reason the code gets a bit more complex and required some changes to inference. I verified with a unit test that the Engine inference is correct compared to the naive inference of `GPT.generate()`. The average of 5 runs was CORE 0.262634 and each of them lasted 1.65 hours (99 minutes).
+
+## Running on Apple Silicon (fork addition)
+
+This fork makes the full nanochat pipeline run on Apple Silicon (MPS), end to end.
+As upstream notes, "you will not get far on your Macbook" — this is for
+education/development, not competitive training. The point is that every stage
+*works* and *measures correctly* on a Mac.
+
+### What was fixed for MPS
+
+- **Device-aware synchronization.** `synchronize()` was `torch.cuda.synchronize` on
+  cuda else a no-op. The no-op silently broke wall-clock/MFU timing on MPS (it timed
+  async dispatch, not compute), and `python -m nanochat.engine` crashed outright
+  (`torch.cuda.synchronize()` raises "Torch not compiled with CUDA enabled" off-CUDA).
+  Now routed through a `get_sync_fn` that uses `torch.mps.synchronize` on MPS.
+- **KV cache dtype.** The inference cache was hardcoded `bf16 on cuda, fp32 else`,
+  which made `NANOCHAT_DTYPE=bfloat16` inference *crash* on MPS/CPU (mixed-dtype
+  attention). It now follows `COMPUTE_DTYPE`, fixing bf16 inference and halving
+  KV-cache memory when bf16 is in use.
+- **bf16 docs.** Clarified that recent macOS runs bf16 on MPS for ~25% memory savings
+  (see the README precision section); the default stays fp32 for broad compatibility.
+
+### Measured on an Apple M4 Max (macOS 26.4.1, torch 2.9.1, CPU/MPS install)
+
+Setup: `uv sync --extra cpu`. Tiny educational scale — outputs are gibberish; the
+numbers are about throughput / memory / correctness, not capability.
+
+| stage | result |
+|-------|--------|
+| Tokenizer train (vocab 32768, 200M chars) | ~21 s |
+| `base_train` depth-4, seq 512, bs 16, fp32 | ~42k tok/sec |
+| `base_train` depth-4, seq 512, bs 16, bf16 | ~54k tok/sec |
+| bf16 vs fp32 peak memory (125.8M params, controlled bench) | 1041 vs 1412 MB (−26%) |
+| Inference: KV-cached `Engine.generate` vs naive `model.generate` | 1.89 s vs 12.19 s, identical output |
+| `base_eval` BPB (train / val) | 2.40 / 2.17 |
+
+Notes:
+
+- bf16 *training* speed on MPS is config-dependent (faster here at depth-4, slower at
+  depth-8 in a separate microbench). The consistent bf16 win on MPS is **memory**, not
+  throughput — there is no FA3/bf16 tensor-core fast path on Mac.
+- `base_eval`'s CORE metric runs on MPS (e.g. hellaswag passes), but note the
+  pre-existing upstream bug karpathy/nanochat#550: a `--core-metric-max-per-task` below
+  a task's few-shot count (e.g. 8 < jeopardy's 10-shot) raises "Sample larger than
+  population". Use `--max-per-task >= 16` (as `runs/runcpu.sh` does) to avoid it.
+
+### Quick start on a Mac
+
+```bash
+uv sync --extra cpu && source .venv/bin/activate
+bash runs/runcpu.sh          # tiny end-to-end demo: data -> tokenizer -> train -> SFT
+python -m scripts.chat_cli -p "What is the capital of France?"   # or talk to a model
+```
