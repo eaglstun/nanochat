@@ -17,7 +17,7 @@ import signal
 import warnings
 from contextlib import contextmanager
 from collections import deque
-from nanochat.common import compute_init, autodetect_device_type, get_sync_fn
+from nanochat.common import compute_init, autodetect_device_type, get_sync_fn, COMPUTE_DTYPE
 from nanochat.checkpoint_manager import load_model
 
 # -----------------------------------------------------------------------------
@@ -177,13 +177,14 @@ class Engine:
         """Same as generate, but does single prefill and then clones the KV cache."""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
-        # NOTE: setting the dtype here and in this way is an ugly hack.
-        # Currently the repo assumes that cuda -> bfloat16 and everything else -> float32.
-        # We need to know the dtype here to call __init__ on KVCache and pre-allocate its tensors.
-        # As a quick hack, we're making generate() function inherit and know about this repo-wise assumption.
-        # I think there has to be a bigger refactor to deal with device/dtype tracking across the codebase.
-        # In particular, the KVCache should allocate its tensors lazily
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        # The KV cache must match the model's compute dtype: the model emits q/k/v in
+        # COMPUTE_DTYPE, and flash_attn_with_kvcache writes k/v into the cache then runs
+        # attention over them, so a mismatched cache dtype makes attention see mixed
+        # dtypes and raise ("Expected query, key, and value to have the same dtype").
+        # The previous "cuda -> bf16 else fp32" rule broke NANOCHAT_DTYPE=bfloat16
+        # inference on CPU/MPS (and fp32 on pre-Ampere CUDA). COMPUTE_DTYPE is the single
+        # source of truth and also halves KV-cache memory whenever bf16 is in use.
+        dtype = COMPUTE_DTYPE
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
