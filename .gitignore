@@ -9,7 +9,6 @@ eval_bundle/
 .env
 
 # Local setup
-CLAUDE.md
 wandb/
 
 issue-685-comment.md
