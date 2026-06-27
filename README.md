@@ -100,6 +100,8 @@ The important thing to note is that nanochat is written and configured around on
 
 The script [runs/runcpu.sh](runs/runcpu.sh) shows a very simple example of running on CPU or Apple Silicon. It dramatically shrinks the LLM that is being trained to make things fit into a reasonable time interval of a few ten minutes of training. You will not get strong results in this way.
 
+> **Fork note (eaglstun/nanochat):** this fork hardens the Apple Silicon (MPS) path so the full pipeline — training, eval, `chat_cli`, and the `chat_web` browser UI — runs end-to-end on a Mac. It fixes an `nanochat.engine` crash off-CUDA, makes wall-clock/MFU timing and peak-memory reporting correct on MPS, and fixes `NANOCHAT_DTYPE=bfloat16` inference (which used to crash on MPS/CPU) so bf16 also halves KV-cache memory. See [dev/LEADERBOARD.md](dev/LEADERBOARD.md#running-on-apple-silicon-fork-addition) for what changed and reproduced M4 Max numbers.
+
 ## Precision / dtype
 
 nanochat does not use `torch.amp.autocast`. Instead, precision is managed explicitly through a single global `COMPUTE_DTYPE` (defined in `nanochat/common.py`). By default this is auto-detected based on your hardware:
